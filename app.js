@@ -19,6 +19,7 @@ const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
 const AUTH_STORAGE_KEY = "remotehub-demo-users";
+const API_BASE_URL = "http://127.0.0.1:8080/api";
 
 const registry = [
   { serial: "ESP32-0001", secret: "alpha-001", valid: true },
@@ -55,12 +56,43 @@ const devices = [
   },
 ];
 
+let sessionToken = "";
+let currentUser = null;
+
 function getStoredUsers() {
   return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "[]");
 }
 
 function saveStoredUsers(users) {
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(users));
+}
+
+function setSession(token, user) {
+  sessionToken = token;
+  currentUser = user;
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
+  }
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed with status ${response.status}`);
+  }
+
+  return data;
 }
 
 function showLogin() {
@@ -80,43 +112,35 @@ function updateStats() {
 }
 
 async function sendDeviceCommand(device, action) {
-  if (!device.live || !device.ip || !device.token) {
-    if (action === "on") {
-      device.relay = true;
-    } else if (action === "off") {
-      device.relay = false;
-    } else {
-      device.relay = !device.relay;
-    }
+  if (sessionToken && device.serial) {
+    const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/command`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    device.relay = data.result.relay;
+    device.online = data.result.wifiConnected;
     return;
   }
 
-  const response = await fetch(`http://${device.ip}/api/${action}?token=${device.token}`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Command failed with status ${response.status}`);
+  if (!device.live || !device.ip || !device.token) {
+    if (action === "on") device.relay = true;
+    if (action === "off") device.relay = false;
+    if (action === "toggle") device.relay = !device.relay;
+    return;
   }
-
-  const data = await response.json();
-  device.relay = data.relay;
-  device.online = data.wifiConnected;
 }
 
 async function fetchDeviceStatus(device) {
-  if (!device.live || !device.ip || !device.token) {
+  if (sessionToken && device.serial) {
+    const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/status`);
+    device.relay = data.status.relay;
+    device.online = data.status.wifiConnected;
     return;
   }
 
-  const response = await fetch(`http://${device.ip}/api/status?token=${device.token}`);
-  if (!response.ok) {
-    throw new Error(`Status failed with status ${response.status}`);
+  if (!device.live || !device.ip || !device.token) {
+    return;
   }
-
-  const data = await response.json();
-  device.relay = data.relay;
-  device.online = data.wifiConnected;
 }
 
 function renderDevices() {
@@ -181,21 +205,25 @@ function closeModal() {
 }
 
 loginForm.addEventListener("submit", (event) => {
+loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const email = document.getElementById("email").value.trim().toLowerCase();
   const password = document.getElementById("password").value;
-  const users = getStoredUsers();
-  const matchedUser = users.find((user) => user.email === email && user.password === password);
 
-  if (users.length > 0 && !matchedUser) {
-    alert("Login failed. Use a registered account or clear demo storage.");
-    return;
+  try {
+    const data = await apiRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    setSession(data.token, data.user);
+    loginPanel.classList.add("hidden");
+    registerPanel.classList.add("hidden");
+    dashboard.classList.remove("hidden");
+    await loadDevicesFromBackend();
+    renderDevices();
+  } catch (error) {
+    alert(`Login failed: ${error.message}`);
   }
-
-  loginPanel.classList.add("hidden");
-  registerPanel.classList.add("hidden");
-  dashboard.classList.remove("hidden");
-  renderDevices();
 });
 
 logoutBtn.addEventListener("click", () => {
@@ -209,6 +237,7 @@ showRegisterBtn.addEventListener("click", showRegister);
 showLoginBtn.addEventListener("click", showLogin);
 
 registerForm.addEventListener("submit", (event) => {
+registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const name = document.getElementById("registerName").value.trim();
@@ -226,57 +255,71 @@ registerForm.addEventListener("submit", (event) => {
     return;
   }
 
-  const users = getStoredUsers();
-  if (users.find((user) => user.email === email)) {
-    registerMessage.textContent = "This email is already registered in demo storage.";
+  try {
+    await apiRequest("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({
+        displayName: name,
+        email,
+        password,
+      }),
+    });
+    registerMessage.textContent = "Registration completed. You can log in now.";
+    registerForm.reset();
+  } catch (error) {
+    registerMessage.textContent = error.message;
+  }
+});
+
+async function loadDevicesFromBackend() {
+  if (!sessionToken) {
     return;
   }
 
-  users.push({ name, email, password });
-  saveStoredUsers(users);
-  registerMessage.textContent = "Registration completed. You can log in now.";
-  registerForm.reset();
-});
+  const data = await apiRequest("/devices");
+  if (Array.isArray(data.devices) && data.devices.length > 0) {
+    devices.length = 0;
+    data.devices.forEach((device, index) => {
+      devices.push({
+        id: index + 1,
+        name: device.deviceName,
+        serial: device.deviceId,
+        online: true,
+        relay: device.relayState === "ON",
+        ip: device.deviceIp,
+        token: device.httpToken,
+        live: true,
+      });
+    });
+  }
+}
 
-deviceForm.addEventListener("submit", (event) => {
+deviceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const name = document.getElementById("deviceName").value.trim();
   const serial = document.getElementById("deviceSerial").value.trim().toUpperCase();
   const secret = document.getElementById("deviceSecret").value.trim();
 
-  const existsInRegistry = registry.find(
-    (item) => item.serial === serial && item.secret === secret && item.valid
-  );
-  const existsInUserList = devices.find((device) => device.serial === serial);
+  try {
+    await apiRequest("/devices/add", {
+      method: "POST",
+      body: JSON.stringify({
+        deviceId: serial,
+        deviceSecret: secret,
+        deviceName: name,
+      }),
+    });
 
-  if (!existsInRegistry) {
-    deviceMessage.textContent =
-      "Device validation failed. This serial or secret is not registered in the whitelist.";
-    return;
+    deviceMessage.textContent = "Device added successfully.";
+    await loadDevicesFromBackend();
+    renderDevices();
+    setTimeout(() => {
+      closeModal();
+    }, 900);
+  } catch (error) {
+    deviceMessage.textContent = error.message;
   }
-
-  if (existsInUserList) {
-    deviceMessage.textContent = "This device is already registered in the dashboard.";
-    return;
-  }
-
-  devices.unshift({
-    id: Date.now(),
-    name,
-    serial,
-    online: true,
-    relay: false,
-    live: false,
-  });
-
-  deviceMessage.textContent =
-    "Device validated successfully. In the final system this step should come from backend + Google Sheet or database.";
-  renderDevices();
-
-  setTimeout(() => {
-    closeModal();
-  }, 900);
 });
 
 async function refreshLiveDevices() {
