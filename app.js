@@ -18,54 +18,11 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const AUTH_STORAGE_KEY = "remotehub-demo-users";
-const API_BASE_URL = "http://127.0.0.1:8080/api";
+const API_BASE_URL = `${window.location.origin}/api`;
 
-const registry = [
-  { serial: "ESP32-0001", secret: "alpha-001", valid: true },
-  { serial: "ESP32-0007", secret: "relay-007", valid: true },
-  { serial: "ESP32-0020", secret: "edge-020", valid: true },
-];
-
-const devices = [
-  {
-    id: 1,
-    name: "Gate Relay",
-    serial: "ESP32-0001",
-    online: true,
-    relay: false,
-    ip: "172.20.10.7",
-    token: "token-esp32-001",
-    live: true,
-  },
-  {
-    id: 2,
-    name: "Living Room",
-    serial: "ESP32-0007",
-    online: true,
-    relay: true,
-    live: false,
-  },
-  {
-    id: 3,
-    name: "Pump Control",
-    serial: "ESP32-0020",
-    online: true,
-    relay: true,
-    live: false,
-  },
-];
-
+const devices = [];
 let sessionToken = "";
 let currentUser = null;
-
-function getStoredUsers() {
-  return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "[]");
-}
-
-function saveStoredUsers(users) {
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(users));
-}
 
 function setSession(token, user) {
   sessionToken = token;
@@ -112,35 +69,19 @@ function updateStats() {
 }
 
 async function sendDeviceCommand(device, action) {
-  if (sessionToken && device.serial) {
-    const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/command`, {
-      method: "POST",
-      body: JSON.stringify({ action }),
-    });
-    device.relay = data.result.relay;
-    device.online = data.result.wifiConnected;
-    return;
-  }
+  const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/command`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
 
-  if (!device.live || !device.ip || !device.token) {
-    if (action === "on") device.relay = true;
-    if (action === "off") device.relay = false;
-    if (action === "toggle") device.relay = !device.relay;
-    return;
-  }
+  device.relay = data.result.relay;
+  device.online = data.result.wifiConnected;
 }
 
 async function fetchDeviceStatus(device) {
-  if (sessionToken && device.serial) {
-    const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/status`);
-    device.relay = data.status.relay;
-    device.online = data.status.wifiConnected;
-    return;
-  }
-
-  if (!device.live || !device.ip || !device.token) {
-    return;
-  }
+  const data = await apiRequest(`/devices/${encodeURIComponent(device.serial)}/status`);
+  device.relay = data.status.relay;
+  device.online = data.status.wifiConnected;
 }
 
 function renderDevices() {
@@ -156,7 +97,7 @@ function renderDevices() {
     const toggleButton = node.querySelector(".btn-device-toggle");
 
     name.textContent = device.name;
-    meta.textContent = `${device.serial} • Relay ${device.relay ? "ON" : "OFF"}${device.live ? ` • ${device.ip}` : " • Demo"}`;
+    meta.textContent = `${device.serial} • Relay ${device.relay ? "ON" : "OFF"} • ${device.ip || "-"}`;
     badge.textContent = device.online ? "Online" : "Offline";
     badge.classList.add(device.online ? "online" : "offline");
 
@@ -200,11 +141,31 @@ function openModal() {
 function closeModal() {
   deviceModal.classList.add("hidden");
   deviceForm.reset();
-  deviceMessage.textContent =
-    "Demo validation checks a mock list. Final version should validate with backend.";
+  deviceMessage.textContent = "Validate a device against backend registry.";
 }
 
-loginForm.addEventListener("submit", (event) => {
+async function loadDevicesFromBackend() {
+  if (!sessionToken) {
+    return;
+  }
+
+  const data = await apiRequest("/devices");
+  devices.length = 0;
+
+  if (Array.isArray(data.devices)) {
+    data.devices.forEach((device, index) => {
+      devices.push({
+        id: index + 1,
+        name: device.deviceName,
+        serial: device.deviceId,
+        online: true,
+        relay: device.relayState === "ON",
+        ip: device.deviceIp,
+      });
+    });
+  }
+}
+
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const email = document.getElementById("email").value.trim().toLowerCase();
@@ -227,6 +188,9 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 logoutBtn.addEventListener("click", () => {
+  sessionToken = "";
+  currentUser = null;
+  devices.length = 0;
   showLogin();
 });
 
@@ -236,7 +200,6 @@ closeModalBackdrop.addEventListener("click", closeModal);
 showRegisterBtn.addEventListener("click", showRegister);
 showLoginBtn.addEventListener("click", showLogin);
 
-registerForm.addEventListener("submit", (event) => {
 registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -271,29 +234,6 @@ registerForm.addEventListener("submit", async (event) => {
   }
 });
 
-async function loadDevicesFromBackend() {
-  if (!sessionToken) {
-    return;
-  }
-
-  const data = await apiRequest("/devices");
-  if (Array.isArray(data.devices) && data.devices.length > 0) {
-    devices.length = 0;
-    data.devices.forEach((device, index) => {
-      devices.push({
-        id: index + 1,
-        name: device.deviceName,
-        serial: device.deviceId,
-        online: true,
-        relay: device.relayState === "ON",
-        ip: device.deviceIp,
-        token: device.httpToken,
-        live: true,
-      });
-    });
-  }
-}
-
 deviceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -323,9 +263,7 @@ deviceForm.addEventListener("submit", async (event) => {
 });
 
 async function refreshLiveDevices() {
-  const liveDevices = devices.filter((device) => device.live);
-
-  for (const device of liveDevices) {
+  for (const device of devices) {
     try {
       await fetchDeviceStatus(device);
     } catch (error) {
