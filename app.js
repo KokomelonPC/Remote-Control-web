@@ -18,7 +18,10 @@ const template = document.getElementById("deviceCardTemplate");
 const onlineCount = document.getElementById("onlineCount");
 const activeRelayCount = document.getElementById("activeRelayCount");
 
-const API_BASE_URL = "http://171.4.46.228:8080/api";
+const API_BASE_URL =
+  window.location.protocol === "file:"
+    ? "http://192.168.1.118:8080/api"
+    : `${window.location.origin}/api`;
 
 const devices = [];
 let sessionToken = "";
