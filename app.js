@@ -21,7 +21,7 @@ const activeRelayCount = document.getElementById("activeRelayCount");
 const BACKEND_ORIGIN =
   window.location.port === "8080"
     ? window.location.origin
-    : "https://may-allergy-publicity-varied.trycloudflare.com";
+    : "https://howto-capital-arbitrary-mild.trycloudflare.com";
 const API_BASE_URL = `${BACKEND_ORIGIN}/api`;
 
 const devices = [];
